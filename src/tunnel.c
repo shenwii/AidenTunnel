@@ -302,7 +302,6 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                         raw_socket_t *tmp_raw_socket;
                         for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
                         {
-                            //check client address = dest address
                             if(tmp_raw_socket->addr.s_addr == iphdr->daddr)
                             {
                                 LOG_INFO("send package to %s\n", address_str4((struct in_addr *) &iphdr->daddr));
@@ -445,7 +444,30 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                         if(hlen <= 0)
                             continue;
                         LOG_INFO("send forward package to tun\n");
-                        write(tun_fd, icmp_buffer + hlen, r - hlen);
+                        if(ip4_addr->s_addr == tunnel_hdr->daddr.s_addr)
+                        {
+                            write(tun_fd, icmp_buffer + hlen, r - hlen);
+                            continue;
+                        }
+                        if(server_mode == 1)
+                        {
+                            char has_client = 0;
+                            raw_socket_t *tmp_raw_socket;
+                            for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
+                            {
+                                if(tmp_raw_socket->addr.s_addr == tunnel_hdr->daddr.s_addr)
+                                {
+                                    struct in_addr tmp_in_addr = tunnel_hdr->daddr;
+                                    LOG_INFO("send package to %s\n", address_str4(&tmp_in_addr));
+                                    size_t len = hlen - sizeof(tunnel_hdr_t);
+                                    has_client = 1;
+                                    __send_icmp(tmp_raw_socket, 1, (struct sockaddr *) &tmp_raw_socket->client_addr, icmp_buffer + len, r - len);
+                                    break;
+                                }
+                            }
+                            if(!has_client)
+                                write(tun_fd, icmp_buffer + hlen, r - hlen);
+                        }
                         break;
                     default:
                         LOG_DEBUG("unknown type = %d\n", tunnel_hdr->type);

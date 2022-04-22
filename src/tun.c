@@ -50,20 +50,13 @@ int tun_alloc(struct in_addr *ip4_addr, struct in_addr *ip4_netmask, int mtu)
 {
     struct ifreq ifr;
     int fd;
-    char tun_dev_name[IFNAMSIZ + 15];
+    char *tun_dev_name = "tun%d";
     memset(&ifr, 0, sizeof(struct ifreq));
     fd = open("/dev/net/tun", O_RDWR);
     if(fd <= 0)
         return -1;
     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-    for(int tun_num = 0; ;tun_num++)
-    {
-        sprintf(ifr.ifr_name, "tun%d", tun_num);
-        //TODO
-        sprintf(tun_dev_name, "/sys/class/net/%s", ifr.ifr_name);
-        if(access(tun_dev_name, F_OK) != 0 )
-            break;
-    }
+    memcpy(ifr.ifr_name, tun_dev_name, strlen(tun_dev_name) + 1);
     if(ioctl(fd, TUNSETIFF, &ifr) < 0)
     {
         close(fd);
