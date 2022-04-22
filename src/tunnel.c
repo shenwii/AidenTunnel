@@ -117,7 +117,8 @@ static void __send_icmp4(raw_socket_t *raw_socket, char type, struct sockaddr_in
     hdr.un.echo.sequence = raw_socket->seq;
     memcpy(icmp_buffer, &hdr, sizeof(struct icmphdr));
     memcpy(icmp_buffer + sizeof(struct icmphdr), buf, len);
-    hdr.checksum = __check_sum((unsigned char *) icmp_buffer , sizeof(struct icmphdr) + len);
+    hdr.checksum = htons(__check_sum((unsigned char *) icmp_buffer , sizeof(struct icmphdr) + len));
+    memcpy(icmp_buffer, &hdr, sizeof(struct icmphdr));
     sendto(raw_socket->fd, icmp_buffer, sizeof(struct icmphdr) + len, MSG_NOSIGNAL, (struct sockaddr*) addr, sizeof(struct sockaddr_in));
 }
 
@@ -133,7 +134,8 @@ static void __send_icmp6(raw_socket_t *raw_socket, char type, struct sockaddr_in
     hdr.icmp6_seq = raw_socket->seq;
     memcpy(icmp_buffer, &hdr, sizeof(struct icmp6_hdr));
     memcpy(icmp_buffer + sizeof(struct icmp6_hdr), buf, len);
-    hdr.icmp6_cksum = __check_sum((unsigned char *) icmp_buffer , sizeof(struct icmp6_hdr) + len);
+    hdr.icmp6_cksum = htons(__check_sum((unsigned char *) icmp_buffer , sizeof(struct icmp6_hdr) + len));
+    memcpy(icmp_buffer, &hdr, sizeof(struct icmp6_hdr));
     sendto(raw_socket->fd, icmp_buffer, sizeof(struct icmp6_hdr) + len, MSG_NOSIGNAL, (struct sockaddr*) addr, sizeof(struct sockaddr_in6));
 }
 
@@ -300,6 +302,7 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                     {
                         //dest address is in lan
                         raw_socket_t *tmp_raw_socket;
+                        char has_client = 0;
                         for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
                         {
                             if(tmp_raw_socket->addr.s_addr == iphdr->daddr)
@@ -314,10 +317,14 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                                 memcpy(buf, &tunnel_hdr, sizeof(tunnel_hdr_t));
                                 memcpy(buf + sizeof(tunnel_hdr_t), tun_buffer, r);
                                 __send_icmp(tmp_raw_socket, 1, (struct sockaddr *) &tmp_raw_socket->client_addr, buf, sizeof(tunnel_hdr_t) + r);
+                                has_client = 1;
                                 break;
                             }
                         }
-                        LOG_INFO("client %s is not exists\n", address_str4((struct in_addr *) &iphdr->daddr));
+                        if(!has_client)
+                        {
+                            LOG_INFO("client %s is not exists\n", address_str4((struct in_addr *) &iphdr->daddr));
+                        }
                     }
                     else
                     {
