@@ -392,7 +392,7 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                 switch (tunnel_hdr->type)
                 {
                     case TUNNEL_TPYE_HEARTBEAT:
-                        LOG_DEBUG("recv heartbeat package");
+                        LOG_DEBUG("recv heartbeat package\n");
                         if(server_mode == 0)
                             continue;
                         raw_socket_t *tmp_raw_socket;
