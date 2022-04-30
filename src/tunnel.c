@@ -388,7 +388,6 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                 {
                     struct ether_arp *eth_arp;
                     eth_arp = (struct ether_arp *) (tun_buffer + sizeof(struct ether_header));
-
                     if(server_mode == 0)
                     {
                         /*
@@ -411,7 +410,7 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                         raw_socket_t *tmp_raw_socket;
                         for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
                         {
-                            if(memcmp(&tmp_raw_socket->addr, &eth_arp->arp_tpa, sizeof(struct in_addr)) == 0)
+                            if(ntohs(eth_arp->arp_op) == ARPOP_REQUEST || memcmp(&tmp_raw_socket->addr, &eth_arp->arp_tpa, sizeof(struct in_addr)) == 0)
                             {
                                 char buf[sizeof(tunnel_hdr_t) + r];
                                 tunnel_hdr_t tunnel_hdr;
@@ -635,20 +634,13 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                             if(tmp_len < sizeof(struct ether_arp))
                                 continue;
                             eth_arp = (struct ether_arp *) tmp_buf;
-                            if(memcmp(ip4_addr, &eth_arp->arp_tpa, sizeof(struct in_addr)) == 0)
+                            write(tun_fd, tmp_buf - sizeof(struct ether_header), tmp_len + sizeof(struct ether_header));
+                            if(ntohs(eth_arp->arp_op) == ARPOP_REQUEST && server_mode == 1)
                             {
-                                write(tun_fd, tmp_buf - sizeof(struct ether_header), tmp_len + sizeof(struct ether_header));
-                            }
-                            else
-                            {
-                                if(server_mode == 1)
+                                raw_socket_t *tmp_raw_socket;
+                                for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
                                 {
-                                    raw_socket_t *tmp_raw_socket;
-                                    for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
-                                    {
-                                        if(memcmp(&tmp_raw_socket->addr, &eth_arp->arp_tpa, sizeof(struct in_addr)) == 0)
-                                            __send_icmp(tmp_raw_socket, 1, (struct sockaddr *) &tmp_raw_socket->client_addr, tmp_buf - sizeof(struct ether_header) - sizeof(tunnel_hdr_t), tmp_len + sizeof(struct ether_header) + sizeof(tunnel_hdr_t));
-                                    }
+                                    __send_icmp(tmp_raw_socket, 1, (struct sockaddr *) &tmp_raw_socket->client_addr, tmp_buf - sizeof(struct ether_header) - sizeof(tunnel_hdr_t), tmp_len + sizeof(struct ether_header) + sizeof(tunnel_hdr_t));
                                 }
                             }
                         }
