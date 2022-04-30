@@ -4,7 +4,11 @@
 #include <getopt.h>
 #include <string.h>
 #include <arpa/inet.h>
+#if defined __linux__ && !defined SELECT
 #include <sys/epoll.h>
+#else
+#include <sys/select.h>
+#endif
 #include <sys/fcntl.h>
 #include <sys/random.h>
 #include <netinet/ether.h>
@@ -21,7 +25,9 @@
 //don't change this
 #define TUN_MTU 1420
 #define ICMP_BUFFER_LENGTH 1500
+#if defined __linux__ && !defined SELECT
 #define EPOLL_NUM 3
+#endif
 #define IO_MUXING_TIMEOUT 5000
 #define HEARTBEAT_SNEDTIME 10
 #define HEARTBEAT_TIMEOUT 30
@@ -187,12 +193,25 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
     char tun_buffer[TUN_MTU];
     //buffer for data when reading from icmp
     char icmp_buffer[ICMP_BUFFER_LENGTH];
+    int raw_fd4;
+    int raw_fd6;
+#if defined __linux__ && !defined SELECT
     //epoll fd
     int epfd;
     //temporary epoll event
     struct epoll_event ev;
     //temporary epoll event array
     struct epoll_event events[EPOLL_NUM];
+#else
+    //select read set
+    fd_set read_set;
+    int max_fd;
+    struct timeval timeout_s;
+    int fd_array[3];
+    int fd_count;
+    memset(&timeout_s, 0, sizeof(struct timeval));
+    timeout_s.tv_usec = IO_MUXING_TIMEOUT * 1000;
+#endif
     //epoll wait count
     int wait_count;
     //client list
@@ -204,6 +223,8 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
     memcpy(key_buffer, key, strlen(key));
     //calculate the key crc32
     uint32_t key_crc32 = CRC32(key_buffer, 64); 
+#if defined __linux__ && !defined SELECT
+    LOG_DEBUG("use epoll\n");
     epfd = epoll_create1(0);
     if(epfd < 0)
     {
@@ -214,10 +235,12 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
     ev.events = EPOLLIN;
     ev.data.fd = tun_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, tun_fd, &ev);
+#else
+    LOG_DEBUG("use select\n");
+    fd_array[0] = tun_fd;
+#endif
     if(server_mode == 1)
     {
-        int raw_fd4;
-        int raw_fd6;
         //create ipv4 and ipv6 socket to handle icmp package
         raw_fd4 = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
         if(raw_fd4 <= 0)
@@ -225,8 +248,12 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
             LOG_ERR("create socket failed\n");
             abort();
         }
+#if defined __linux__ && !defined SELECT
         ev.data.fd = raw_fd4;
         epoll_ctl(epfd, EPOLL_CTL_ADD, raw_fd4, &ev);
+#else
+        fd_array[1] = raw_fd4;
+#endif
 
         raw_fd6 = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
         if(raw_fd6 <= 0)
@@ -234,8 +261,14 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
             LOG_ERR("create socket failed\n");
             abort();
         }
+#if defined __linux__ && !defined SELECT
         ev.data.fd = raw_fd6;
         epoll_ctl(epfd, EPOLL_CTL_ADD, raw_fd6, &ev);
+#else
+        fd_array[2] = raw_fd6;
+        max_fd = raw_fd6;
+        fd_count = 3;
+#endif
     }
     else
     {
@@ -246,8 +279,14 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
             LOG_ERR("create socket failed\n");
             abort();
         }
+#if defined __linux__ && !defined SELECT
         ev.data.fd = raw_socket.fd;
         epoll_ctl(epfd, EPOLL_CTL_ADD, raw_socket.fd, &ev);
+#else
+        fd_array[1] = raw_socket.fd;
+        max_fd = raw_socket.fd;
+        fd_count = 2;
+#endif
         raw_socket.heartbeat_time = time(NULL);
         raw_socket.seq = 1;
         raw_socket.addr = *ip4_addr;
@@ -257,7 +296,22 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
     }
     while(1)
     {
+#if defined __linux__ && !defined SELECT
         wait_count = epoll_wait(epfd, events, EPOLL_NUM, IO_MUXING_TIMEOUT);
+#else
+        FD_ZERO(&read_set);
+        FD_SET(tun_fd, &read_set);
+        if(server_mode == 1)
+        {
+            FD_SET(raw_fd4, &read_set);
+            FD_SET(raw_fd6, &read_set);
+        }
+        else
+        {
+            FD_SET(raw_socket.fd, &read_set);
+        }
+        wait_count = select(max_fd + 1, &read_set, NULL, NULL, &timeout_s);
+#endif
         /*
             detecting heartbeat
             the client will send a heartbeat packet at regular intervals
@@ -303,15 +357,27 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                 raw_socket.heartbeat_time = time(NULL);
             }
         }
+            int event_fd;
+#if defined __linux__ && !defined SELECT
         for(int i = 0; i < wait_count; i++)
         {
             //events although there is still the possibility of EPOLLERR and EPOLLHUP, it should not be possible here.
             if(!(events[i].events & EPOLLIN))
                 continue;
-            if(events[i].data.fd == tun_fd)
+            event_fd = events[i].data.fd;
+#else
+        if(wait_count <= 0)
+            continue;
+        for(int i = 0; i < fd_count; i++)
+        {
+            if(!FD_ISSET(fd_array[i], &read_set))
+                continue;
+            event_fd = fd_array[i];
+#endif
+            if(event_fd == tun_fd)
             {
                 //package from tun device
-                int r = read(events[i].data.fd, tun_buffer, TUN_MTU);
+                int r = read(event_fd, tun_buffer, TUN_MTU);
                 if(r <= sizeof(struct ether_header))
                     continue;
                 struct ether_header *eth_hdr = (struct ether_header *) tun_buffer;
@@ -437,7 +503,7 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                 //package from icmp socket
                 struct sockaddr_storage client_addr;
                 socklen_t addr_len = sizeof(client_addr);
-                int r = recvfrom(events[i].data.fd, icmp_buffer, ICMP_BUFFER_LENGTH, MSG_NOSIGNAL, (struct sockaddr *) &client_addr, &addr_len);
+                int r = recvfrom(event_fd, icmp_buffer, ICMP_BUFFER_LENGTH, MSG_NOSIGNAL, (struct sockaddr *) &client_addr, &addr_len);
                 tunnel_hdr_t *tunnel_hdr;
                 uint16_t code;
                 uint16_t seq;
@@ -535,7 +601,7 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                                 tmp_raw_socket->seq = seq;
                                 tmp_raw_socket->heartbeat_time = time(NULL);
                                 tmp_raw_socket->client_addr = client_addr;
-                                tmp_raw_socket->fd = events[i].data.fd;
+                                tmp_raw_socket->fd = event_fd;
                                 has_client = 1;
                                 break;
                             }
@@ -558,7 +624,7 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                             tmp_raw_socket->seq = seq;
                             tmp_raw_socket->client_addr = client_addr;
                             tmp_raw_socket->next = NULL;
-                            tmp_raw_socket->fd = events[i].data.fd;
+                            tmp_raw_socket->fd = event_fd;
                             if(raw_socket_list == NULL)
                             {
                                 raw_socket_list = tmp_raw_socket;
@@ -654,8 +720,11 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                         break;
                 }
             }
-
+#if defined __linux__ && !defined SELECT
         }
+#else
+        }
+#endif
     }
 }
 
