@@ -476,7 +476,7 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                         raw_socket_t *tmp_raw_socket;
                         for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
                         {
-                            if(ntohs(eth_arp->arp_op) == ARPOP_REQUEST || memcmp(&tmp_raw_socket->addr, &eth_arp->arp_tpa, sizeof(struct in_addr)) == 0)
+                            if(ntohs(eth_arp->arp_op) == ARPOP_REQUEST || memcmp(&tmp_raw_socket->addr, eth_arp->arp_tpa, sizeof(struct in_addr)) == 0)
                             {
                                 char buf[sizeof(tunnel_hdr_t) + r];
                                 tunnel_hdr_t tunnel_hdr;
