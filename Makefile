@@ -17,11 +17,6 @@ else
 LDFLAGS += -s -Os
 endif
 
-ifeq ($(SELECT),1)
-CFLAGS += -DSELECT
-endif
-
-
 SOURCES = tunnel.c tun.c common.c crc32.c
 OBJECTS = $(patsubst %.c,$(OBJDIR)/%.o,$(SOURCES))
 

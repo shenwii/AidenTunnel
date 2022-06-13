@@ -199,7 +199,7 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
     unsigned char key_buffer[64] = {0};
     memcpy(key_buffer, key, strlen(key));
     //calculate the key crc32
-    uint32_t key_crc32 = CRC32(key_buffer, 64);
+    uint32_t key_crc32 = CRC32(key_buffer, 64); 
     epfd = epoll_create1(0);
     if(epfd < 0)
     {
@@ -554,7 +554,7 @@ int main(int argc, char **argv)
     int c;
     int index;
     int tun_fd;
-    struct option long_options[] =
+    struct option long_options[] = 
     {
         {"addr", required_argument, NULL, 'a'},
         {"help", no_argument, NULL, 'h'},
@@ -616,7 +616,7 @@ int main(int argc, char **argv)
                 return 1;
             default:
                 break;
-        }
+        }   
     }
     if(strlen(address) == 0)
     {
