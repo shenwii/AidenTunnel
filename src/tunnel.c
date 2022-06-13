@@ -4,14 +4,9 @@
 #include <getopt.h>
 #include <string.h>
 #include <arpa/inet.h>
-#if defined __linux__ && !defined SELECT
 #include <sys/epoll.h>
-#else
-#include <sys/select.h>
-#endif
 #include <sys/fcntl.h>
 #include <sys/random.h>
-#include <netinet/ether.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <netinet/icmp6.h>
@@ -25,9 +20,7 @@
 //don't change this
 #define TUN_MTU 1420
 #define ICMP_BUFFER_LENGTH 1500
-#if defined __linux__ && !defined SELECT
 #define EPOLL_NUM 3
-#endif
 #define IO_MUXING_TIMEOUT 5000
 #define HEARTBEAT_SNEDTIME 10
 #define HEARTBEAT_TIMEOUT 30
@@ -39,9 +32,7 @@ typedef struct
 {
     //package type, 1:TUNNEL_TPYE_HEARTBEAT, 2:TUNNEL_TPYE_FORWARD
     unsigned char type;
-    unsigned char unused[1];
-    //source ether mac addresss
-    struct ether_addr seth;
+    unsigned char unused[3];
     //key crc32
     union
     {
@@ -50,6 +41,8 @@ typedef struct
     } key_u;
     //source address
     struct in_addr saddr;
+    //destination address
+    struct in_addr daddr;
 } __attribute__((__packed__)) tunnel_hdr_t;
 
 typedef struct raw_socket_s raw_socket_t;
@@ -60,8 +53,6 @@ struct raw_socket_s
     int fd;
     //tun address
     struct in_addr addr;
-    //tun mac address
-    struct ether_addr ether_addr;
     //client address
     struct sockaddr_storage client_addr;
     //icmp code
@@ -172,9 +163,8 @@ static void __send_heartbeat(raw_socket_t *raw_socket, uint32_t key, struct sock
     //send heartbeat package
     tunnel_hdr_t tunnel_hdr;
     tunnel_hdr.type = TUNNEL_TPYE_HEARTBEAT;
-    tunnel_hdr.saddr = raw_socket->addr;
-    tunnel_hdr.seth = raw_socket->ether_addr;
     memcpy(&tunnel_hdr.saddr, &raw_socket->addr, sizeof(tunnel_hdr.saddr));
+    memset(&tunnel_hdr.daddr, 0, sizeof(tunnel_hdr.saddr));
     tunnel_hdr.key_u.crc32_i = htonl(key);
     __send_icmp(raw_socket, 0, server_addr, (char *) &tunnel_hdr, sizeof(tunnel_hdr_t));
 }
@@ -187,31 +177,18 @@ static void __send_heartbeat(raw_socket_t *raw_socket, uint32_t key, struct sock
  * server_mode: is it a service model: 1:yes, 0:no
  * server_addr: server address
 */
-static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *ip4_netmask, struct ether_addr *eth_addr, char *key , char server_mode, struct sockaddr *server_addr)
+static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *ip4_netmask, char *key , char server_mode, struct sockaddr *server_addr)
 {
     //buffer for data when reading tun devices
     char tun_buffer[TUN_MTU];
     //buffer for data when reading from icmp
     char icmp_buffer[ICMP_BUFFER_LENGTH];
-    int raw_fd4;
-    int raw_fd6;
-#if defined __linux__ && !defined SELECT
     //epoll fd
     int epfd;
     //temporary epoll event
     struct epoll_event ev;
     //temporary epoll event array
     struct epoll_event events[EPOLL_NUM];
-#else
-    //select read set
-    fd_set read_set;
-    int max_fd;
-    struct timeval timeout_s;
-    int fd_array[3];
-    int fd_count;
-    memset(&timeout_s, 0, sizeof(struct timeval));
-    timeout_s.tv_usec = IO_MUXING_TIMEOUT * 1000;
-#endif
     //epoll wait count
     int wait_count;
     //client list
@@ -222,9 +199,7 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
     unsigned char key_buffer[64] = {0};
     memcpy(key_buffer, key, strlen(key));
     //calculate the key crc32
-    uint32_t key_crc32 = CRC32(key_buffer, 64); 
-#if defined __linux__ && !defined SELECT
-    LOG_DEBUG("use epoll\n");
+    uint32_t key_crc32 = CRC32(key_buffer, 64);
     epfd = epoll_create1(0);
     if(epfd < 0)
     {
@@ -235,12 +210,10 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
     ev.events = EPOLLIN;
     ev.data.fd = tun_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, tun_fd, &ev);
-#else
-    LOG_DEBUG("use select\n");
-    fd_array[0] = tun_fd;
-#endif
     if(server_mode == 1)
     {
+        int raw_fd4;
+        int raw_fd6;
         //create ipv4 and ipv6 socket to handle icmp package
         raw_fd4 = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
         if(raw_fd4 <= 0)
@@ -248,12 +221,8 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
             LOG_ERR("create socket failed\n");
             abort();
         }
-#if defined __linux__ && !defined SELECT
         ev.data.fd = raw_fd4;
         epoll_ctl(epfd, EPOLL_CTL_ADD, raw_fd4, &ev);
-#else
-        fd_array[1] = raw_fd4;
-#endif
 
         raw_fd6 = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
         if(raw_fd6 <= 0)
@@ -261,14 +230,9 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
             LOG_ERR("create socket failed\n");
             abort();
         }
-#if defined __linux__ && !defined SELECT
         ev.data.fd = raw_fd6;
         epoll_ctl(epfd, EPOLL_CTL_ADD, raw_fd6, &ev);
-#else
-        fd_array[2] = raw_fd6;
-        max_fd = raw_fd6;
-        fd_count = 3;
-#endif
+
     }
     else
     {
@@ -279,39 +243,17 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
             LOG_ERR("create socket failed\n");
             abort();
         }
-#if defined __linux__ && !defined SELECT
         ev.data.fd = raw_socket.fd;
         epoll_ctl(epfd, EPOLL_CTL_ADD, raw_socket.fd, &ev);
-#else
-        fd_array[1] = raw_socket.fd;
-        max_fd = raw_socket.fd;
-        fd_count = 2;
-#endif
         raw_socket.heartbeat_time = time(NULL);
         raw_socket.seq = 1;
         raw_socket.addr = *ip4_addr;
-        raw_socket.ether_addr = *eth_addr;
         getrandom(&raw_socket.code, sizeof(raw_socket.code), GRND_RANDOM);
         __send_heartbeat(&raw_socket, key_crc32, server_addr);
     }
     while(1)
     {
-#if defined __linux__ && !defined SELECT
         wait_count = epoll_wait(epfd, events, EPOLL_NUM, IO_MUXING_TIMEOUT);
-#else
-        FD_ZERO(&read_set);
-        FD_SET(tun_fd, &read_set);
-        if(server_mode == 1)
-        {
-            FD_SET(raw_fd4, &read_set);
-            FD_SET(raw_fd6, &read_set);
-        }
-        else
-        {
-            FD_SET(raw_socket.fd, &read_set);
-        }
-        wait_count = select(max_fd + 1, &read_set, NULL, NULL, &timeout_s);
-#endif
         /*
             detecting heartbeat
             the client will send a heartbeat packet at regular intervals
@@ -357,145 +299,78 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                 raw_socket.heartbeat_time = time(NULL);
             }
         }
-            int event_fd;
-#if defined __linux__ && !defined SELECT
         for(int i = 0; i < wait_count; i++)
         {
             //events although there is still the possibility of EPOLLERR and EPOLLHUP, it should not be possible here.
             if(!(events[i].events & EPOLLIN))
                 continue;
-            event_fd = events[i].data.fd;
-#else
-        if(wait_count <= 0)
-            continue;
-        for(int i = 0; i < fd_count; i++)
-        {
-            if(!FD_ISSET(fd_array[i], &read_set))
-                continue;
-            event_fd = fd_array[i];
-#endif
-            if(event_fd == tun_fd)
+            if(events[i].data.fd == tun_fd)
             {
                 //package from tun device
-                int r = read(event_fd, tun_buffer, TUN_MTU);
-                if(r <= sizeof(struct ether_header))
+                int r = read(events[i].data.fd, tun_buffer, TUN_MTU);
+                if(r <= 0)
                     continue;
-                struct ether_header *eth_hdr = (struct ether_header *) tun_buffer;
-                if(ntohs(eth_hdr->ether_type) == ETHERTYPE_IP)
+                struct iphdr *iphdr = (struct iphdr *) tun_buffer;
+                //tun device, only ipv4 packets are processed, ipv6 packets are discarded
+                if(iphdr->version != 4)
                 {
-                    struct iphdr *iphdr = (struct iphdr *) (tun_buffer + sizeof(struct ether_header));
-                    //tun device, only ipv4 packets are processed, ipv6 packets are discarded
-                    if(iphdr->version != 4)
-                    {
-                        LOG_INFO("ip version %d is not supported\n", iphdr->version);
-                        continue;
-                    }
-                    if(server_mode == 0)
-                    {
-                        /*
-                            if it is a client, the tun packet is forwarded to the server
-                            TODO: need to optimize client routing tables
-                        */
-                        LOG_DEBUG("send tun package to server\n");
-                        char buf[sizeof(tunnel_hdr_t) + r];
-                        tunnel_hdr_t tunnel_hdr;
-                        tunnel_hdr.saddr.s_addr = iphdr->saddr;
-                        memcpy(&tunnel_hdr.seth, eth_hdr->ether_shost, sizeof(struct ether_addr));
-                        tunnel_hdr.type = TUNNEL_TPYE_FORWARD;
-                        tunnel_hdr.key_u.crc32_i = htonl(key_crc32);
-                        memcpy(buf, &tunnel_hdr, sizeof(tunnel_hdr_t));
-                        memcpy(buf + sizeof(tunnel_hdr_t), tun_buffer, r);
-                        __send_icmp(&raw_socket, 0, server_addr, buf, sizeof(tunnel_hdr_t) + r);
-                    }
-                    else
-                    {
-                        //if it is the server side, then first determine whether the destination IP is the same virtual LAN
-                        if((iphdr->daddr & ip4_netmask->s_addr) == (ip4_addr->s_addr & ip4_netmask->s_addr))
-                        {
-                            //if it is on the same LAN, look up the client in the routing table and forward it if found
-                            raw_socket_t *tmp_raw_socket;
-                            char has_client = 0;
-                            for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
-                            {
-                                if(tmp_raw_socket->addr.s_addr == iphdr->daddr)
-                                {
-                                    LOG_INFO("send package to %s\n", address_str4((struct in_addr *) &iphdr->daddr));
-                                    char buf[sizeof(tunnel_hdr_t) + r];
-                                    tunnel_hdr_t tunnel_hdr;
-                                    tunnel_hdr.saddr = tmp_raw_socket->addr;
-                                    tunnel_hdr.seth = tmp_raw_socket->ether_addr;
-                                    tunnel_hdr.key_u.crc32_i = htonl(key_crc32);
-                                    tunnel_hdr.type = TUNNEL_TPYE_FORWARD;
-                                    memcpy(buf, &tunnel_hdr, sizeof(tunnel_hdr_t));
-                                    memcpy(buf + sizeof(tunnel_hdr_t), tun_buffer, r);
-                                    __send_icmp(tmp_raw_socket, 1, (struct sockaddr *) &tmp_raw_socket->client_addr, buf, sizeof(tunnel_hdr_t) + r);
-                                    has_client = 1;
-                                    break;
-                                }
-                            }
-                            if(!has_client)
-                            {
-                                //if the client is not found, it is discarded
-                                LOG_INFO("client %s is not exists\n", address_str4((struct in_addr *) &iphdr->daddr));
-                            }
-                        }
-                        else
-                        {
-                            //if it is not from the same LAN, it is discarded
-                            LOG_DEBUG("not the same lan package, droped\n");
-                        }
-                    }
+                    LOG_INFO("ip version %d is not supported\n", iphdr->version);
+                    continue;
                 }
-                else if(ntohs(eth_hdr->ether_type) == ETHERTYPE_IPV6)
+                if(server_mode == 0)
                 {
-                    LOG_INFO("ipv6 not supported\n");
+                    /*
+                        if it is a client, the tun packet is forwarded to the server
+                        TODO: need to optimize client routing tables
+                    */
+                    LOG_DEBUG("send tun package to server\n");
+                    char buf[sizeof(tunnel_hdr_t) + r];
+                    tunnel_hdr_t tunnel_hdr;
+                    tunnel_hdr.saddr.s_addr = iphdr->saddr;
+                    tunnel_hdr.daddr.s_addr = iphdr->daddr;
+                    tunnel_hdr.type = TUNNEL_TPYE_FORWARD;
+                    tunnel_hdr.key_u.crc32_i = htonl(key_crc32);
+                    memcpy(buf, &tunnel_hdr, sizeof(tunnel_hdr_t));
+                    memcpy(buf + sizeof(tunnel_hdr_t), tun_buffer, r);
+                    __send_icmp(&raw_socket, 0, server_addr, buf, sizeof(tunnel_hdr_t) + r);
                 }
-                else if(ntohs(eth_hdr->ether_type) == ETHERTYPE_ARP)
+                else
                 {
-                    struct ether_arp *eth_arp;
-                    eth_arp = (struct ether_arp *) (tun_buffer + sizeof(struct ether_header));
-                    if(server_mode == 0)
+                    //if it is the server side, then first determine whether the destination IP is the same virtual LAN
+                    if((iphdr->daddr & ip4_netmask->s_addr) == (ip4_addr->s_addr & ip4_netmask->s_addr))
                     {
-                        /*
-                            if it is a client, the tun packet is forwarded to the server
-                            TODO: need to optimize client routing tables
-                        */
-                        LOG_DEBUG("send tun package to server\n");
-                        char buf[sizeof(tunnel_hdr_t) + r];
-                        tunnel_hdr_t tunnel_hdr;
-                        //tunnel_hdr.saddr.s_addr = iphdr->saddr;
-                        memcpy(&tunnel_hdr.seth, eth_hdr->ether_shost, sizeof(struct ether_addr));
-                        tunnel_hdr.type = TUNNEL_TPYE_FORWARD;
-                        tunnel_hdr.key_u.crc32_i = htonl(key_crc32);
-                        memcpy(buf, &tunnel_hdr, sizeof(tunnel_hdr_t));
-                        memcpy(buf + sizeof(tunnel_hdr_t), tun_buffer, r);
-                        __send_icmp(&raw_socket, 0, server_addr, buf, sizeof(tunnel_hdr_t) + r);
-                    }
-                    else
-                    {
+                        //if it is on the same LAN, look up the client in the routing table and forward it if found
                         raw_socket_t *tmp_raw_socket;
+                        char has_client = 0;
                         for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
                         {
-                            if(ntohs(eth_arp->arp_op) == ARPOP_REQUEST || memcmp(&tmp_raw_socket->addr, eth_arp->arp_tpa, sizeof(struct in_addr)) == 0)
+                            if(tmp_raw_socket->addr.s_addr == iphdr->daddr)
                             {
+                                LOG_INFO("send package to %s\n", address_str4((struct in_addr *) &iphdr->daddr));
                                 char buf[sizeof(tunnel_hdr_t) + r];
                                 tunnel_hdr_t tunnel_hdr;
-                                //tunnel_hdr.saddr.s_addr = iphdr->saddr;
-                                memcpy(&tunnel_hdr.seth, eth_hdr->ether_shost, sizeof(struct ether_addr));
-                                tunnel_hdr.saddr = *ip4_addr;
-                                tunnel_hdr.seth = *eth_addr;
+                                tunnel_hdr.saddr.s_addr = iphdr->saddr;
+                                tunnel_hdr.daddr.s_addr = iphdr->daddr;
                                 tunnel_hdr.key_u.crc32_i = htonl(key_crc32);
                                 tunnel_hdr.type = TUNNEL_TPYE_FORWARD;
                                 memcpy(buf, &tunnel_hdr, sizeof(tunnel_hdr_t));
                                 memcpy(buf + sizeof(tunnel_hdr_t), tun_buffer, r);
                                 __send_icmp(tmp_raw_socket, 1, (struct sockaddr *) &tmp_raw_socket->client_addr, buf, sizeof(tunnel_hdr_t) + r);
+                                has_client = 1;
+                                break;
                             }
                         }
+                        if(!has_client)
+                        {
+                            //if the client is not found, it is discarded
+                            LOG_INFO("client %s is not exists\n", address_str4((struct in_addr *) &iphdr->daddr));
+                        }
                     }
-                }
-                else
-                {
-                    LOG_WARN("ether type 0x%04x is not supported\n", eth_hdr->ether_type);
+                    else
+                    {
+                        //if it is not from the same LAN, it is discarded
+                        LOG_DEBUG("not the same lan package, droped\n");
+                    }
                 }
             }
             else
@@ -503,12 +378,11 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                 //package from icmp socket
                 struct sockaddr_storage client_addr;
                 socklen_t addr_len = sizeof(client_addr);
-                int r = recvfrom(event_fd, icmp_buffer, ICMP_BUFFER_LENGTH, MSG_NOSIGNAL, (struct sockaddr *) &client_addr, &addr_len);
+                int r = recvfrom(events[i].data.fd, icmp_buffer, ICMP_BUFFER_LENGTH, MSG_NOSIGNAL, (struct sockaddr *) &client_addr, &addr_len);
                 tunnel_hdr_t *tunnel_hdr;
                 uint16_t code;
                 uint16_t seq;
-                char *tmp_buf;
-                size_t tmp_len;
+                size_t hlen;
                 if(r < sizeof(struct iphdr))
                     continue;
                 //the icmp packets received here start with the ip protocol, so first, the ip protocol version is parsed
@@ -531,8 +405,8 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                     }
                     code = icmphdr->un.echo.id;
                     seq = icmphdr->un.echo.sequence;
-                    tmp_buf = icmp_buffer + sizeof(struct iphdr) + sizeof(struct icmphdr);
-                    tmp_len = r - sizeof(struct iphdr) - sizeof(struct icmphdr);
+                    tunnel_hdr = (tunnel_hdr_t *) (icmp_buffer + sizeof(struct iphdr) + sizeof(struct icmphdr));
+                    hlen = sizeof(struct iphdr) + sizeof(struct icmphdr) + sizeof(tunnel_hdr_t);
                 }
                 else if(((struct iphdr *) icmp_buffer)->version == 6)
                 {
@@ -553,19 +427,14 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                     }
                     code = icmphdr->icmp6_id;
                     seq = icmphdr->icmp6_seq;
-                    tmp_buf = icmp_buffer + sizeof(struct ip6_hdr) + sizeof(struct icmp6_hdr);
-                    tmp_len = r - sizeof(struct ip6_hdr) + sizeof(struct icmp6_hdr);
+                    tunnel_hdr = (tunnel_hdr_t *) (icmp_buffer + sizeof(struct ip6_hdr) + sizeof(struct icmp6_hdr));
+                    hlen = sizeof(struct ip6_hdr) + sizeof(struct icmp6_hdr) + sizeof(tunnel_hdr_t);
                 }
                 else
                 {
                     LOG_DEBUG("unsupported ip version = %d\n", ((struct iphdr *) icmp_buffer)->version);
                     continue;
                 }
-                if(tmp_len < sizeof(tunnel_hdr_t))
-                    continue;
-                tunnel_hdr = (tunnel_hdr_t *) tmp_buf;
-                tmp_buf += sizeof(tunnel_hdr_t);
-                tmp_len -= sizeof(tunnel_hdr_t);
                 //verify key
                 if(ntohl(tunnel_hdr->key_u.crc32_i) != key_crc32)
                 {
@@ -597,11 +466,10 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                             if(tmp_raw_socket->code == code)
                             {
                                 tmp_raw_socket->addr = tunnel_hdr->saddr;
-                                tmp_raw_socket->ether_addr = tunnel_hdr->seth;
                                 tmp_raw_socket->seq = seq;
                                 tmp_raw_socket->heartbeat_time = time(NULL);
                                 tmp_raw_socket->client_addr = client_addr;
-                                tmp_raw_socket->fd = event_fd;
+                                tmp_raw_socket->fd = events[i].data.fd;
                                 has_client = 1;
                                 break;
                             }
@@ -618,13 +486,12 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                             }
                             LOG_INFO("new client connected, id = %u\n", code);
                             tmp_raw_socket->addr = tunnel_hdr->saddr;
-                            tmp_raw_socket->ether_addr = tunnel_hdr->seth;
                             tmp_raw_socket->heartbeat_time = time(NULL);
                             tmp_raw_socket->code = code;
                             tmp_raw_socket->seq = seq;
                             tmp_raw_socket->client_addr = client_addr;
                             tmp_raw_socket->next = NULL;
-                            tmp_raw_socket->fd = event_fd;
+                            tmp_raw_socket->fd = events[i].data.fd;
                             if(raw_socket_list == NULL)
                             {
                                 raw_socket_list = tmp_raw_socket;
@@ -638,81 +505,38 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                         break;
                     case TUNNEL_TPYE_FORWARD:
                         //handling forward packets
-                        if(tmp_len < sizeof(struct ether_header))
+                        if(hlen <= 0)
                             continue;
-                        struct ether_header *eth_hdr = (struct ether_header *) tmp_buf;
-                        // struct ether_addr *seth;
-                        // struct ether_addr *deth;
-                        char *forward_buf = tmp_buf;
-                        size_t forward_buf_len = tmp_len;
-                        tmp_buf += sizeof(struct ether_header);
-                        tmp_len -= sizeof(struct ether_header);
-                        // seth = (struct ether_addr *) &eth_hdr->ether_shost;
-                        // deth = (struct ether_addr *) &eth_hdr->ether_dhost;
-                        if(ntohs(eth_hdr->ether_type) == ETHERTYPE_IP)
+                        //if the destination IP is the ip of tun, then forward
+                        if(ip4_addr->s_addr == tunnel_hdr->daddr.s_addr)
                         {
-                            // struct in_addr *saddr;
-                            struct in_addr *daddr;
-                            if(tmp_len < sizeof(struct iphdr))
-                                continue;
-                            struct iphdr *ip_hdr = (struct iphdr *) tmp_buf;
-                            tmp_buf += sizeof(struct iphdr);
-                            tmp_len -= sizeof(struct iphdr);
-                            if(ip_hdr->version != 4)
-                                continue;
-                            // saddr = (struct in_addr *) &ip_hdr->saddr;
-                            daddr = (struct in_addr *) &ip_hdr->daddr;
-                            //if the destination IP is the ip of tun, then forward
-                            if(ip4_addr->s_addr == daddr->s_addr)
-                            {
-                                LOG_INFO("send forward package to tun\n");
-                                write(tun_fd, forward_buf, forward_buf_len);
-                                continue;
-                            }
-                            if(server_mode == 1)
-                            {
-                                /*
-                                    if it is a server side
-                                    then look for the client, and forward it to the corresponding client directly if found
-                                    if the client is not found, it will be forwarded to the tun device and the kernel will handle it
-                                */
-                                raw_socket_t *tmp_raw_socket;
-                                for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
-                                {
-                                    if(tmp_raw_socket->addr.s_addr == daddr->s_addr)
-                                    {
-                                        LOG_INFO("send package to %s\n", address_str4(daddr));
-                                        has_client = 1;
-                                        __send_icmp(tmp_raw_socket, 1, (struct sockaddr *) &tmp_raw_socket->client_addr, forward_buf - sizeof(tunnel_hdr_t), forward_buf_len + sizeof(tunnel_hdr_t));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        else if(ntohs(eth_hdr->ether_type) == ETHERTYPE_IPV6)
-                        {
-                            LOG_DEBUG("unsupported ipv6 package\n");
+                            LOG_INFO("send forward package to tun\n");
+                            write(tun_fd, icmp_buffer + hlen, r - hlen);
                             continue;
                         }
-                        else if(ntohs(eth_hdr->ether_type) == ETHERTYPE_ARP)
+                        if(server_mode == 1)
                         {
-                            struct ether_arp *eth_arp;
-                            if(tmp_len < sizeof(struct ether_arp))
-                                continue;
-                            eth_arp = (struct ether_arp *) tmp_buf;
-                            write(tun_fd, tmp_buf - sizeof(struct ether_header), tmp_len + sizeof(struct ether_header));
-                            if(ntohs(eth_arp->arp_op) == ARPOP_REQUEST && server_mode == 1)
+                            /*
+                                if it is a server side
+                                then look for the client, and forward it to the corresponding client directly if found
+                                if the client is not found, it will be forwarded to the tun device and the kernel will handle it
+                            */
+                            char has_client = 0;
+                            raw_socket_t *tmp_raw_socket;
+                            for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
                             {
-                                raw_socket_t *tmp_raw_socket;
-                                for(tmp_raw_socket = raw_socket_list; tmp_raw_socket != NULL; tmp_raw_socket = tmp_raw_socket->next)
+                                if(tmp_raw_socket->addr.s_addr == tunnel_hdr->daddr.s_addr)
                                 {
-                                    __send_icmp(tmp_raw_socket, 1, (struct sockaddr *) &tmp_raw_socket->client_addr, tmp_buf - sizeof(struct ether_header) - sizeof(tunnel_hdr_t), tmp_len + sizeof(struct ether_header) + sizeof(tunnel_hdr_t));
+                                    struct in_addr tmp_in_addr = tunnel_hdr->daddr;
+                                    LOG_INFO("send package to %s\n", address_str4(&tmp_in_addr));
+                                    size_t len = hlen - sizeof(tunnel_hdr_t);
+                                    has_client = 1;
+                                    __send_icmp(tmp_raw_socket, 1, (struct sockaddr *) &tmp_raw_socket->client_addr, icmp_buffer + len, r - len);
+                                    break;
                                 }
                             }
-                        }
-                        else
-                        {
-                            LOG_WARN("ether type 0x%04x is not supported\n", eth_hdr->ether_type);
+                            if(!has_client)
+                                write(tun_fd, icmp_buffer + hlen, r - hlen);
                         }
                         break;
                     default:
@@ -720,11 +544,8 @@ static void __epoll_loop(int tun_fd, struct in_addr *ip4_addr, struct in_addr *i
                         break;
                 }
             }
-#if defined __linux__ && !defined SELECT
+
         }
-#else
-        }
-#endif
     }
 }
 
@@ -733,7 +554,7 @@ int main(int argc, char **argv)
     int c;
     int index;
     int tun_fd;
-    struct option long_options[] = 
+    struct option long_options[] =
     {
         {"addr", required_argument, NULL, 'a'},
         {"help", no_argument, NULL, 'h'},
@@ -748,7 +569,6 @@ int main(int argc, char **argv)
     char server_mode = 0;
     struct in_addr ip4_addr;
     struct in_addr ip4_netmask;
-    struct ether_addr eth_addr;
     struct sockaddr server_addr;
 
     while(EOF != (c = getopt_long(argc, argv, "a:hk:n:s:", long_options, &index)))
@@ -796,7 +616,7 @@ int main(int argc, char **argv)
                 return 1;
             default:
                 break;
-        }   
+        }
     }
     if(strlen(address) == 0)
     {
@@ -836,12 +656,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "illegal netmask addresses\n");
         return 1;
     }
-    tun_fd = tun_alloc(&ip4_addr, &ip4_netmask, &eth_addr, TUN_MTU);
+    tun_fd = tun_alloc(&ip4_addr, &ip4_netmask, TUN_MTU);
     if(tun_fd < 0)
     {
         LOG_ERR("create tun device failed, you should probably run it with root\n");
         return 1;
     }
-    __epoll_loop(tun_fd, &ip4_addr, &ip4_netmask, &eth_addr, key, server_mode, &server_addr);
+    __epoll_loop(tun_fd, &ip4_addr, &ip4_netmask, key, server_mode, &server_addr);
     return 0;
 }
