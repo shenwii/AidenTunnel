@@ -31,7 +31,7 @@ static int __tun_set_up(int udp_fd, struct ifreq *ifr)
 static int __tun_set_ip4(int udp_fd, struct ifreq *ifr, struct in_addr *ip4_addr)
 {
     ((struct sockaddr_in *) &ifr->ifr_addr)->sin_family = AF_INET;
-    ((struct sockaddr_in *) &ifr->ifr_netmask)->sin_addr = *ip4_addr;
+    ((struct sockaddr_in *) &ifr->ifr_addr)->sin_addr = *ip4_addr;
     if(ioctl(udp_fd, SIOCSIFADDR, ifr) <0)
         return -1;
     return 0;
